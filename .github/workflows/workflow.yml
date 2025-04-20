@@ -39,7 +39,7 @@ jobs:
 
     steps:
       - name: Init Runner ⚙️
-        uses: UnterrainerInformatik/init-runner-action@v1
+        uses: UnterrainerInformatik/init-runner-action@master
 
       - name: Cache Maven packages 💾
         uses: actions/cache@v3

@@ -1,0 +1,121 @@
+name: Build and publish to Maven Central 🔨
+
+on:
+  workflow_call:
+    inputs:
+      major_version:
+        required: true
+        type: string
+      minor_version:
+        required: true
+        type: string
+      build_version:
+        required: true
+        type: string
+      maven_profiles:
+        required: false
+        type: string
+        default: release-to-sonatype
+      maven_args:
+        required: false
+        type: string
+        default: -Dmaven.test.skip=true
+    secrets:
+      SONATYPE_USERNAME:
+        required: true
+      SONATYPE_PASSWORD:
+        required: true
+      GPG_SECRET_KEY:
+        required: true
+      GPG_OWNERTRUST:
+        required: true
+      GPG_PASSPHRASE:
+        required: true
+
+jobs:
+  build:
+    name: Build and publish to Maven Central 🔨
+    runs-on: [self-hosted, Linux, X64]
+
+    steps:
+      - name: Init Runner ⚙️
+        uses: UnterrainerInformatik/init-runner-action@v1
+
+      - name: Cache Maven packages 💾
+        uses: actions/cache@v3
+        with:
+          path: ~/.m2/repository
+          key: ${{ runner.os }}-maven-${{ hashFiles('**/pom.xml') }}
+          restore-keys: ${{ runner.os }}-maven-
+
+      - name: Set up JDK 21 ⚙️
+        uses: actions/setup-java@v4
+        with:
+          java-version: '21'
+          distribution: 'temurin'
+          server-id: maven
+          server-username: ${{ secrets.SONATYPE_USERNAME }}
+          server-password: ${{ secrets.SONATYPE_PASSWORD }}
+
+      - name: Set up GPG for CI 🔐
+        run: |
+          which gpg2 || sudo apt update && sudo apt install -y gnupg2
+          mkdir -p ~/.gnupg
+          chmod 700 ~/.gnupg
+          echo "use-agent" >> ~/.gnupg/gpg.conf
+          echo "pinentry-mode loopback" >> ~/.gnupg/gpg.conf
+          echo "allow-loopback-pinentry" >> ~/.gnupg/gpg-agent.conf
+          echo "default-cache-ttl 600" >> ~/.gnupg/gpg-agent.conf
+          echo "max-cache-ttl 7200" >> ~/.gnupg/gpg-agent.conf
+          gpgconf --kill gpg-agent
+          gpgconf --launch gpg-agent
+          echo "${{ secrets.GPG_SECRET_KEY }}" | base64 --decode | gpg2 --batch --yes --import
+          echo "${{ secrets.GPG_OWNERTRUST }}" | base64 --decode | gpg2 --import-ownertrust
+          export GPG_TTY=$(tty)
+
+      - name: Write .m2/settings.xml 💾
+        run: |
+          mkdir -p ~/.m2
+          cat <<EOF > ~/.m2/settings.xml
+            <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                      xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+              <servers>
+                <server>
+                  <id>maven</id>
+                  <username>${{ secrets.SONATYPE_USERNAME }}</username>
+                  <password>${{ secrets.SONATYPE_PASSWORD }}</password>
+                </server>
+              </servers>
+            </settings>
+          EOF
+
+      - name: Conditionally setup Maven ⚙️
+        run: |
+          which mvn || (sudo apt update && sudo apt install -y maven)
+
+      - name: Update pom.xml version 💾
+        run: |
+          mvn versions:set -DnewVersion=${{ inputs.major_version }}.${{ inputs.minor_version }}.${{ inputs.build_version }} -DgenerateBackupPoms=false
+
+      - name: Build and publish with Maven 🔨
+        env:
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
+        run: mvn clean deploy --batch-mode --update-snapshots -P${{ inputs.maven_profiles }} ${{ inputs.maven_args }}
+
+      - name: List signed files 🐞
+        run: |
+          echo "📦 Contents of target/:"
+          ls -lh target/
+          echo ""
+          echo "🔍 GPG signatures:"
+          find target/ -type f -name "*.asc" -exec echo "✔ Found:" {} \;
+          echo ""
+          echo "❓ Missing POM signature?" && test ! -f target/*pom.asc && echo "❌ No POM signature found!" || echo "✅ POM is signed."
+
+      - name: Upload build artifacts ⬆️
+        if: ${{ always() && hashFiles('target/*.jar') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: maven-artifacts
+          path: target/*.jar

@@ -20,6 +20,10 @@ on:
         required: false
         type: string
         default: -Dmaven.test.skip=true
+      self_hosted:
+        required: false
+        type: boolean
+        default: false
     secrets:
       SONATYPE_USERNAME:
         required: true
@@ -40,6 +44,8 @@ jobs:
     steps:
       - name: Init Runner ⚙️
         uses: UnterrainerInformatik/init-runner-action@master
+        with:
+          self-hosted: ${{ inputs.self_hosted }}
 
       - name: Cache Maven packages 💾
         uses: actions/cache@v3

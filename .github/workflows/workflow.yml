@@ -112,3 +112,11 @@ jobs:
           find target/ -type f -name "*.asc" -exec echo "✔ Found:" {} \;
           echo ""
           echo "❓ Missing POM signature?" && test ! -f target/*pom.asc && echo "❌ No POM signature found!" || echo "✅ POM is signed."
+
+      - name: Upload build artifacts ⬆️
+        if: ${{ always() && hashFiles('target/*.jar') != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: maven-artifacts
+          path: target/*.jar
+          retention-days: 1

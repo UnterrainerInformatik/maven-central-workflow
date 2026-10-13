@@ -187,7 +187,7 @@ jobs:
         run: >-
           mvn clean deploy --batch-mode --update-snapshots
           -P${{ inputs.internal_profiles }}
-          -DaltDeploymentRepository=reposilite::${REPOSILITE_URL}/releases
+          -DaltDeploymentRepository=reposilite::default::${REPOSILITE_URL}/releases
           ${{ inputs.maven_args }}
 
       - name: List signed files 🐞

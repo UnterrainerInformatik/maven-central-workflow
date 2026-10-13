@@ -1,4 +1,4 @@
-name: Build and publish to Maven Central 🔨
+name: Build and publish to Maven Central or Reposilite 🔨
 
 on:
   workflow_call:
@@ -20,6 +20,18 @@ on:
         required: false
         type: string
         default: -Dmaven.test.skip=true
+      # auto: Maven Central when Central has no <major>.<minor>.* of this
+      # artifact yet or the run was started by hand (workflow_dispatch),
+      # otherwise the runner host's Reposilite. central / internal force it.
+      # Without REPOSILITE_URL on the runner every run goes to Central.
+      target:
+        required: false
+        type: string
+        default: auto
+      internal_profiles:
+        required: false
+        type: string
+        default: release
     secrets:
       SONATYPE_USERNAME:
         required: true
@@ -67,21 +79,40 @@ jobs:
           export GPG_TTY=$(tty)
 
       - name: Write .m2/settings.xml 💾
+        # REPOSILITE_URL, REPOSILITE_USER and REPOSILITE_TOKEN come from the
+        # runner container's environment (set per host in the runner compose),
+        # so every runner host uses its own Reposilite as mirror and target.
         run: |
           mkdir -p ~/.m2
-          cat <<EOF > ~/.m2/settings.xml
-            <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                      xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
-              <servers>
-                <server>
-                  <id>maven</id>
-                  <username>${{ secrets.SONATYPE_USERNAME }}</username>
-                  <password>${{ secrets.SONATYPE_PASSWORD }}</password>
-                </server>
-              </servers>
-            </settings>
-          EOF
+          {
+            echo '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"'
+            echo '          xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"'
+            echo '          xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">'
+            echo '  <servers>'
+            echo '    <server>'
+            echo '      <id>maven</id>'
+            echo '      <username>${{ secrets.SONATYPE_USERNAME }}</username>'
+            echo '      <password>${{ secrets.SONATYPE_PASSWORD }}</password>'
+            echo '    </server>'
+            if [ -n "$REPOSILITE_URL" ]; then
+              echo '    <server>'
+              echo '      <id>reposilite</id>'
+              echo "      <username>${REPOSILITE_USER}</username>"
+              echo "      <password>${REPOSILITE_TOKEN}</password>"
+              echo '    </server>'
+            fi
+            echo '  </servers>'
+            if [ -n "$REPOSILITE_URL" ]; then
+              echo '  <mirrors>'
+              echo '    <mirror>'
+              echo '      <id>reposilite</id>'
+              echo '      <mirrorOf>*</mirrorOf>'
+              echo "      <url>${REPOSILITE_URL}/releases</url>"
+              echo '    </mirror>'
+              echo '  </mirrors>'
+            fi
+            echo '</settings>'
+          } > ~/.m2/settings.xml
 
       - name: Conditionally setup Maven ⚙️
         run: |
@@ -91,10 +122,73 @@ jobs:
         run: |
           mvn versions:set -DnewVersion=${{ inputs.major_version }}.${{ inputs.minor_version }}.${{ inputs.build_version }} -DgenerateBackupPoms=false
 
-      - name: Build and publish with Maven 🔨
+      - name: Choose target 🎯
+        id: target
+        env:
+          TARGET: ${{ inputs.target }}
+          MAJOR_MINOR: ${{ inputs.major_version }}.${{ inputs.minor_version }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ -z "$REPOSILITE_URL" ]; then
+            target=central; why="no REPOSILITE_URL on this runner"
+          elif [ "$TARGET" != auto ]; then
+            target=$TARGET; why="forced by the caller"
+          elif [ "$EVENT" = workflow_dispatch ]; then
+            target=central; why="started by hand"
+          else
+            group=$(mvn -q help:evaluate -Dexpression=project.groupId -DforceStdout)
+            artifact=$(mvn -q help:evaluate -Dexpression=project.artifactId -DforceStdout)
+            url="https://repo1.maven.org/maven2/${group//.//}/${artifact}/maven-metadata.xml"
+            code=$(curl -s -o metadata.xml -w '%{http_code}' "$url")
+            if [ "$code" = 404 ]; then
+              target=central; why="$group:$artifact is not on Central yet"
+            elif [ "$code" != 200 ]; then
+              echo "::error::Central metadata returned HTTP $code for $url"; exit 1
+            elif grep -q "<version>${MAJOR_MINOR}\." metadata.xml; then
+              target=internal; why="Central already has ${MAJOR_MINOR}.x"
+            else
+              target=central; why="new ${MAJOR_MINOR} line"
+            fi
+            rm -f metadata.xml
+          fi
+          echo "target=$target" >> "$GITHUB_OUTPUT"
+          echo "### Target: $target ($why)" >> "$GITHUB_STEP_SUMMARY"
+          echo "Target: $target ($why)"
+
+      - name: Check info.unterrainer dependencies are on Central 🛡️
+        # A POM on Central must not point at a version that only Reposilite has.
+        if: steps.target.outputs.target == 'central'
+        run: |
+          mvn -q dependency:list -DoutputFile=deps.txt -DappendOutput=false
+          ev() { mvn -q help:evaluate -Dexpression="$1" -DforceStdout 2>/dev/null || true; }
+          parent="$(ev project.parent.groupId):$(ev project.parent.artifactId):$(ev project.parent.version)"
+          missing=0
+          for gav in $( (grep -o 'info\.unterrainer[^ ]*' deps.txt | awk -F: '{print $1":"$2":"$4}'; \
+                         echo "$parent" | grep '^info\.unterrainer') | sort -u); do
+            IFS=: read -r g a v <<< "$gav"
+            url="https://repo1.maven.org/maven2/${g//.//}/$a/$v/$a-$v.pom"
+            if [ "$(curl -s -o /dev/null -w '%{http_code}' -I "$url")" = 200 ]; then
+              echo "ok      $gav"
+            else
+              echo "::error::$gav is not on Maven Central, release it first"; missing=1
+            fi
+          done
+          rm -f deps.txt
+          exit $missing
+
+      - name: Build and publish to Maven Central 🔨
+        if: steps.target.outputs.target == 'central'
         env:
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
         run: mvn clean deploy --batch-mode --update-snapshots -P${{ inputs.maven_profiles }} ${{ inputs.maven_args }}
+
+      - name: Build and publish to Reposilite 🔨
+        if: steps.target.outputs.target == 'internal'
+        run: >-
+          mvn clean deploy --batch-mode --update-snapshots
+          -P${{ inputs.internal_profiles }}
+          -DaltDeploymentRepository=reposilite::${REPOSILITE_URL}/releases
+          ${{ inputs.maven_args }}
 
       - name: List signed files 🐞
         run: |

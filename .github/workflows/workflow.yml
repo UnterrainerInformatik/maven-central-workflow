@@ -176,17 +176,32 @@ jobs:
           rm -f deps.txt
           exit $missing
 
+      - name: Check for SNAPSHOT dependencies 🔍
+        # --update-snapshots only re-checks SNAPSHOT versions; without one in a
+        # pom it is a round trip per dependency for nothing.
+        id: snapshots
+        run: |
+          if grep -rqs --include=pom.xml 'SNAPSHOT<' .; then
+            echo "flag=--update-snapshots" >> "$GITHUB_OUTPUT"
+            echo "SNAPSHOT versions found, building with --update-snapshots"
+          else
+            echo "No SNAPSHOT versions, building without --update-snapshots"
+          fi
+
       - name: Build and publish to Maven Central 🔨
         if: steps.target.outputs.target == 'central'
         env:
           MAVEN_GPG_PASSPHRASE: ${{ secrets.GPG_PASSPHRASE }}
-        run: mvn clean deploy --batch-mode --update-snapshots -P${{ inputs.maven_profiles }} ${{ inputs.maven_args }}
+        run: mvn clean deploy --batch-mode ${{ steps.snapshots.outputs.flag }} -P${{ inputs.maven_profiles }} ${{ inputs.maven_args }}
 
       - name: Build and publish to Reposilite 🔨
+        # Central requires javadoc and sources jars, Reposilite does not; the
+        # javadoc run is the slowest part of a library build.
         if: steps.target.outputs.target == 'internal'
         run: >-
-          mvn clean deploy --batch-mode --update-snapshots
+          mvn clean deploy --batch-mode ${{ steps.snapshots.outputs.flag }}
           -P${{ inputs.internal_profiles }}
+          -Dmaven.javadoc.skip=true -Dmaven.source.skip=true
           -DaltDeploymentRepository=reposilite::default::${REPOSILITE_URL}/releases
           ${{ inputs.maven_args }}
 
